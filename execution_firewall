@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""
+CUSTOS — Execution Firewall
+Main orchestrator that coordinates policy engine, rate limiter, and audit logger
+to provide a unified safety gateway for all agent operations.
+"""
+
+import time
+from typing import Dict, Optional, Callable, Any
+from dataclasses import dataclass
+
+from policy_engine import PolicyEngine, PolicyResult
+from rate_limiter import RateLimiter
+from audit_logger import AuditLogger, AuditEntry
+
+
+@dataclass
+class FirewallResult:
+    allowed: bool
+    operation: str
+    policy_result: Optional[PolicyResult] = None
+    rate_limited: bool = False
+    audit_entry: Optional[AuditEntry] = None
+    message: str = ""
+    latency_ms: float = 0.0
+
+    def to_dict(self) -> dict:
+        return {
+            "allowed": self.allowed,
+            "operation": self.operation,
+            "policy_violations": (
+                [r.value for r in self.policy_result.violated_rules]
+                if self.policy_result and not self.policy_result.allowed
+                else []
+            ),
+            "rate_limited": self.rate_limited,
+            "latency_ms": round(self.latency_ms, 3),
+            "message": self.message,
+        }
+
+
+class ExecutionFirewall:
+    """
+    CUSTOS Execution Firewall — Unified safety gateway.
+
+    Every operation passes through:
+    1. Rate limiting (token bucket + daily quotas)
+    2. Policy evaluation (6-rule content safety)
+    3. Audit logging (SHA-256 hash-chained)
+    """
+
+    def __init__(
+        self,
+        bucket_size: int = 10,
+        refill_rate: float = 1.0,
+        daily_limit: int = 100,
+    ):
+        self.policy = PolicyEngine()
+        self.rate_limiter = RateLimiter(
+            bucket_size=bucket_size,
+            refill_rate=refill_rate,
+            daily_limit=daily_limit,
+        )
+        self.audit = AuditLogger()
+        self._operations_blocked = 0
+        self._operations_allowed = 0
+
+    def execute(
+        self,
+        operation: str,
+        content: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> FirewallResult:
+        """Execute an operation through the firewall."""
+        start = time.perf_counter()
+
+        # Step 1: Rate limiting
+        if not self.rate_limiter.allow_request(operation):
+            entry = self.audit.log(
+                "rate_limited",
+                f"Operation '{operation}' blocked by rate limiter",
+            )
+            self._operations_blocked += 1
+            latency = (time.perf_counter() - start) * 1000
+            return FirewallResult(
+                allowed=False,
+                operation=operation,
+                rate_limited=True,
+                audit_entry=entry,
+                message=f"Rate limit exceeded for '{operation}'",
+                latency_ms=latency,
+            )
+
+        # Step 2: Policy evaluation (if content provided)
+        policy_result = None
+        if content:
+            policy_result = self.policy.evaluate(content)
+            if not policy_result.allowed:
+                entry = self.audit.log(
+                    "policy_violation",
+                    f"Operation '{operation}' blocked: {policy_result.reason}",
+                )
+                self._operations_blocked += 1
+                latency = (time.perf_counter() - start) * 1000
+                return FirewallResult(
+                    allowed=False,
+                    operation=operation,
+                    policy_result=policy_result,
+                    audit_entry=entry,
+                    message=policy_result.reason,
+                    latency_ms=latency,
+                )
+
+        # Step 3: Allow and audit
+        detail = f"Operation '{operation}' allowed"
+        if metadata:
+            detail += f" | metadata: {metadata}"
+        entry = self.audit.log("operation_allowed", detail)
+        self._operations_allowed += 1
+
+        latency = (time.perf_counter() - start) * 1000
+        return FirewallResult(
+            allowed=True,
+            operation=operation,
+            policy_result=policy_result,
+            audit_entry=entry,
+            message=f"Operation '{operation}' executed successfully",
+            latency_ms=latency,
+        )
+
+    def check_content(self, content: str) -> PolicyResult:
+        """Quick content safety check without rate limiting."""
+        return self.policy.evaluate(content)
+
+    def get_stats(self) -> dict:
+        return {
+            "operations_allowed": self._operations_allowed,
+            "operations_blocked": self._operations_blocked,
+            "total_operations": self._operations_allowed + self._operations_blocked,
+            "policy_stats": self.policy.get_stats(),
+            "rate_limiter_quotas": self.rate_limiter.get_all_quotas(),
+            "audit_stats": self.audit.get_stats(),
+        }
+
+    def get_audit_chain(self):
+        return self.audit.get_chain()
+
+    def verify_audit_integrity(self) -> bool:
+        return self.audit.verify_chain()
+
+
+# Singleton
+_default_firewall = None
+
+
+def get_firewall() -> ExecutionFirewall:
+    global _default_firewall
+    if _default_firewall is None:
+        _default_firewall = ExecutionFirewall()
+    return _default_firewall
+
+
+def gate(operation: str, content: str = "", **kwargs) -> FirewallResult:
+    """Quick firewall gate using the default instance."""
+    return get_firewall().execute(operation, content, kwargs or None)
+
+
+if __name__ == "__main__":
+    fw = ExecutionFirewall()
+
+    # Test 1: Clean operation
+    r = fw.execute("test_op", "Hello world")
+    assert r.allowed is True
+    print(f"PASS: Clean operation allowed ({r.latency_ms:.3f}ms)")
+
+    # Test 2: Policy violation
+    r = fw.execute("test_op", "how to hack into systems")
+    assert r.allowed is False
+    assert r.policy_result is not None
+    print(f"PASS: Policy violation blocked: {r.message}")
+
+    # Test 3: Rate limit
+    fast_fw = ExecutionFirewall(bucket_size=1, daily_limit=1)
+    fast_fw.execute("burst", "ok")
+    r = fast_fw.execute("burst", "ok")
+    assert r.allowed is False and r.rate_limited is True
+    print("PASS: Rate limit enforced")
+
+    # Test 4: Audit integrity
+    assert fw.verify_audit_integrity() is True
+    print(f"PASS: Audit chain valid ({len(fw.get_audit_chain())} entries)")
+
+    print("\nExecution Firewall: All tests passed!")
