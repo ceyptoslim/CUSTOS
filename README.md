@@ -1,3 +1,5 @@
+> **Superseded (Sept 2026):** this is the original CUSTOS concept repo (June 22, 2026). The living, tested product is **[CUSTOS-CORE](https://github.com/ceyptoslim/CUSTOS-CORE)** — v1.3.2, 470 passed tests, 6 CI gates, AGPL-3.0.
+
 # CUSTOS
 CUSTOS is an autonomous agent-security framework designed to shield generative workflows from compliance violations, safety breaches, and rate exhaustion. The system uses a strict pipeline architecture: Rate Limiting → Content Policy Inspection → Cryptographic Tamper-Evident Auditing.
 
